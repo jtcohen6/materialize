@@ -186,14 +186,7 @@ def wait_for_materialize_views(args: argparse.Namespace) -> None:
 
                     views_to_remove.append(view)
                     expected = view_snapshots[view]
-                    if contents == expected:
-                        print(
-                            f"PASSED: {time_taken:>6.1f}s: {view} (result={contents})"
-                        )
-                    else:
-                        print(
-                            f"FAILED: {time_taken:>6.1f}s: {view} ({contents} != {expected})"
-                        )
+                    record_result(args, view, contents == expected, time_taken)
 
             for view in views_to_remove:
                 pending_views.remove(view)
@@ -201,6 +194,19 @@ def wait_for_materialize_views(args: argparse.Namespace) -> None:
             if pending_views:
                 time.sleep(0.1)
 
+
+def wait_for_materialize_views(args: argparse.Namespace, view: str, matches: bool, time_taken:
+        float) -> None:
+    """Upload timing results and whether or not this view matches the expected results."""
+    # write to broker com.materialize.dev.perfevents.view_load_time topic
+    if matches:
+        print(
+            f"PASSED: {time_taken:>6.1f}s: {view} (result={contents})"
+        )
+    else:
+        print(
+            f"FAILED: {time_taken:>6.1f}s: {view} ({contents} != {expected})"
+        )
 
 def main() -> None:
     """Parse arguments and snapshot materialized views."""
@@ -211,6 +217,14 @@ def main() -> None:
     )
     parser.add_argument(
         "-p", "--port", help="materialized port number", default=6875, type=int
+    )
+
+    parser.add_argument(
+        "--metrics-host", help="kafka broker hostname for writing results to",
+        default="perf-metrics.dev.materialize.com", type=str
+    )
+    parser.add_argument(
+        "--metrics-port", help="kafka broker port for writing results to", default=9092, type=int
     )
 
     parser.add_argument(
