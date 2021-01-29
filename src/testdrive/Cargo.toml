@@ -6,6 +6,7 @@ edition = "2018"
 publish = false
 
 [dependencies]
+async-compression = { version = "0.3.7", features = [ "tokio", "gzip" ] }
 async-trait = "0.1.42"
 atty = "0.2.0"
 aws-util = { path = "../aws-util" }
@@ -14,7 +15,7 @@ bytes = "1.0.1"
 ccsr = { path = "../ccsr" }
 chrono = { version = "0.4.0", default-features = false, features = ["std"] }
 coord = { path = "../coord" }
-futures = "0.3.9"
+futures = "0.3.12"
 interchange = { path = "../interchange" }
 itertools = "0.9.0"
 kafka-util = { path = "../kafka-util" }
@@ -35,15 +36,16 @@ reqwest = { version = "0.11.0", features = ["native-tls-vendored"] }
 rusoto_core = { git = "https://github.com/rusoto/rusoto.git" }
 rusoto_credential = { git = "https://github.com/rusoto/rusoto.git" }
 rusoto_kinesis = { git = "https://github.com/rusoto/rusoto.git" }
+rusoto_s3 = { git = "https://github.com/rusoto/rusoto.git" }
 rusoto_sts = { git = "https://github.com/rusoto/rusoto.git" }
-serde = "1.0.118"
+serde = "1.0.122"
 serde-protobuf = { git = "https://github.com/MaterializeInc/serde-protobuf.git", branch = "add-iter-messages" }
 serde_json = "1.0.60"
 structopt = "0.3.21"
 sql-parser = { path = "../sql-parser" }
-tempfile = "3.1.0"
+tempfile = "3.2.0"
 termcolor = "1.1.2"
-tokio = "1.0.2"
+tokio = "1.1.0"
 tokio-postgres = { version = "0.7.0", features = ["with-chrono-0_4", "with-serde_json-1"] }
 tokio-stream = "0.1.2"
 url = "2.2.0"

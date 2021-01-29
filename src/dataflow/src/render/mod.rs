@@ -104,33 +104,31 @@ use std::rc::Rc;
 use std::rc::Weak;
 use std::{any::Any, cell::RefCell};
 
+use differential_dataflow::hashable::Hashable;
 use differential_dataflow::lattice::Lattice;
 use differential_dataflow::operators::arrange::arrangement::{Arrange, ArrangeByKey};
 use differential_dataflow::operators::arrange::upsert::arrange_from_upsert;
-
-use differential_dataflow::hashable::Hashable;
+use differential_dataflow::operators::Consolidate;
 use differential_dataflow::{AsCollection, Collection};
 use futures::executor::block_on;
-
-use interchange::envelopes::{combine_at_timestamp, dbz_format, upsert_format};
-use repr::adt::decimal::Significand;
+use timely::communication::Allocate;
+use timely::dataflow::operators::exchange::Exchange;
 use timely::dataflow::operators::to_stream::ToStream;
 use timely::dataflow::operators::unordered_input::UnorderedInput;
 use timely::dataflow::operators::Map;
 use timely::dataflow::scopes::Child;
 use timely::dataflow::Scope;
-
-use timely::communication::Allocate;
-use timely::dataflow::operators::exchange::Exchange;
 use timely::worker::Worker as TimelyWorker;
 
 use dataflow_types::*;
-use expr::{GlobalId, Id, MapFilterProject, RelationExpr, ScalarExpr, SourceInstanceId};
+use expr::{GlobalId, Id, MapFilterProject, MirRelationExpr, MirScalarExpr, SourceInstanceId};
+use interchange::envelopes::{combine_at_timestamp, dbz_format, upsert_format};
 use mz_avro::types::Value;
 use mz_avro::Schema;
 use ore::cast::CastFrom;
 use ore::collections::CollectionExt as _;
 use ore::iter::IteratorExt;
+use repr::adt::decimal::Significand;
 use repr::{Datum, RelationType, Row, RowArena, RowPacker, Timestamp};
 
 use crate::decode::{decode_avro_values, decode_values};
@@ -147,7 +145,6 @@ use crate::{
 
 mod arrange_by;
 mod context;
-mod delta_join;
 mod flat_map;
 mod join;
 mod reduce;
@@ -237,7 +234,7 @@ pub fn build_dataflow<A: Allocate>(
     })
 }
 
-impl<'g, G> Context<Child<'g, G, G::Timestamp>, RelationExpr, Row, Timestamp>
+impl<'g, G> Context<Child<'g, G, G::Timestamp>, MirRelationExpr, Row, Timestamp>
 where
     G: Scope<Timestamp = Timestamp>,
 {
@@ -263,7 +260,7 @@ where
                     .insert(src_id, LocalInput { handle, capability });
                 let err_collection = Collection::empty(scope);
                 self.collections.insert(
-                    RelationExpr::global_get(src_id, src.desc.typ().clone()),
+                    MirRelationExpr::global_get(src_id, src.desc.typ().clone()),
                     (stream.as_collection(), err_collection),
                 );
             }
@@ -277,7 +274,7 @@ where
             } => {
                 // TODO(benesch): this match arm is hard to follow. Refactor.
 
-                let get_expr = RelationExpr::global_get(src_id, src.desc.typ().clone());
+                let get_expr = MirRelationExpr::global_get(src_id, src.desc.typ().clone());
 
                 // This uid must be unique across all different instantiations of a source
                 let uid = SourceInstanceId {
@@ -364,7 +361,7 @@ where
 
                             let keys = src.desc.typ().keys[0]
                                 .iter()
-                                .map(|k| ScalarExpr::Column(*k))
+                                .map(|k| MirScalarExpr::Column(*k))
                                 .collect::<Vec<_>>();
                             self.set_local(&get_expr, &keys, (arranged, err_collection.arrange()));
                             capability
@@ -438,7 +435,7 @@ where
                                 .as_collection(),
                         );
 
-                        // TODO(brennan) -- this should just be a RelationExpr::FlatMap using regexp_extract, csv_extract,
+                        // TODO(brennan) -- this should just be a MirRelationExpr::FlatMap using regexp_extract, csv_extract,
                         // a hypothetical future avro_extract, protobuf_extract, etc.
                         let (stream, extra_token) = decode_values(
                             &ok_source,
@@ -461,7 +458,7 @@ where
                     let mut collection = match envelope {
                         SourceEnvelope::None | SourceEnvelope::CdcV2 => stream.as_collection(),
                         SourceEnvelope::Debezium(_) =>
-                        // TODO(btv) -- this should just be a RelationExpr::Explode (name TBD)
+                        // TODO(btv) -- this should just be a MirRelationExpr::Explode (name TBD)
                         {
                             stream.as_collection().explode({
                                 let mut row_packer = repr::RowPacker::new();
@@ -538,7 +535,7 @@ where
 
                     // Introduce the stream by name, as an unarranged collection.
                     self.collections.insert(
-                        RelationExpr::global_get(src_id, src.desc.typ().clone()),
+                        MirRelationExpr::global_get(src_id, src.desc.typ().clone()),
                         (collection, err_collection),
                     );
                     capability
@@ -578,7 +575,7 @@ where
             );
             let ok_arranged = ok_arranged.enter(region);
             let err_arranged = err_arranged.enter(region);
-            let get_expr = RelationExpr::global_get(idx.on_id, typ.clone());
+            let get_expr = MirRelationExpr::global_get(idx.on_id, typ.clone());
             self.set_trace(idx_id, &get_expr, &idx.keys, (ok_arranged, err_arranged));
             self.additional_tokens
                 .entry(idx_id)
@@ -601,7 +598,7 @@ where
         if let Some(typ) = &object.typ {
             self.clone_from_to(
                 &object.relation_expr.as_ref(),
-                &RelationExpr::global_get(object.id, typ.clone()),
+                &MirRelationExpr::global_get(object.id, typ.clone()),
             );
         } else {
             self.render_arrangeby(&object.relation_expr.as_ref(), Some(&object.id.to_string()));
@@ -617,13 +614,13 @@ where
         //
         // TODO: Improve collection and arrangement re-use.
         self.collections.retain(|e, _| {
-            matches!(e, RelationExpr::Get {
+            matches!(e, MirRelationExpr::Get {
                 id: Id::Global(_),
                 typ: _,
             })
         });
         self.local.retain(|e, _| {
-            matches!(e, RelationExpr::Get {
+            matches!(e, MirRelationExpr::Get {
                 id: Id::Global(_),
                 typ: _,
             })
@@ -651,7 +648,7 @@ where
             }
         }
         let tokens = Rc::new((needed_source_tokens, needed_additional_tokens));
-        let get_expr = RelationExpr::global_get(idx.on_id, typ.clone());
+        let get_expr = MirRelationExpr::global_get(idx.on_id, typ.clone());
         match self.arrangement(&get_expr, &idx.keys) {
             Some(ArrangementFlavor::Local(oks, errs)) => {
                 render_state.traces.set(
@@ -691,7 +688,7 @@ where
             }
         }
         let (collection, _err_collection) = self
-            .collection(&RelationExpr::global_get(
+            .collection(&MirRelationExpr::global_get(
                 sink.from,
                 sink.from_desc.typ().clone(),
             ))
@@ -750,6 +747,7 @@ where
                 collection
             }
             SinkEnvelope::Tail { emit_progress } => keyed
+                .consolidate()
                 .inner
                 .map({
                     let mut rp = RowPacker::new();
@@ -834,7 +832,7 @@ where
     }
 }
 
-impl<G> Context<G, RelationExpr, Row, Timestamp>
+impl<G> Context<G, MirRelationExpr, Row, Timestamp>
 where
     G: Scope<Timestamp = Timestamp>,
 {
@@ -845,14 +843,14 @@ where
     /// operator.
     fn try_render_map_filter_project(
         &mut self,
-        relation_expr: &RelationExpr,
+        relation_expr: &MirRelationExpr,
         scope: &mut G,
         worker_index: usize,
     ) -> bool {
         // Extract a MapFilterProject and residual from `relation_expr`.
         let (mfp, input) = MapFilterProject::extract_from_expression(relation_expr);
         match input {
-            RelationExpr::Get { .. } => {
+            MirRelationExpr::Get { .. } => {
                 // TODO: determine if `mfp` is no-op to simplify implementation.
                 let mfp2 = mfp.clone();
                 self.ensure_rendered(&input, scope, worker_index);
@@ -908,14 +906,14 @@ where
                     .insert(relation_expr.clone(), (oks.as_collection(), err_collection));
                 true
             }
-            RelationExpr::FlatMap { input: input2, .. } => {
+            MirRelationExpr::FlatMap { input: input2, .. } => {
                 self.ensure_rendered(&input2, scope, worker_index);
                 let (oks, err) = self.render_flat_map(input, Some(mfp));
                 self.collections.insert(relation_expr.clone(), (oks, err));
                 true
             }
 
-            RelationExpr::Join {
+            MirRelationExpr::Join {
                 inputs,
                 implementation,
                 ..
@@ -956,17 +954,17 @@ where
     /// collections are rendered,
     pub fn ensure_rendered(
         &mut self,
-        relation_expr: &RelationExpr,
+        relation_expr: &MirRelationExpr,
         scope: &mut G,
         worker_index: usize,
     ) {
         if !self.has_collection(relation_expr) {
-            // Each of the `RelationExpr` variants have logic to render themselves to either
+            // Each of the `MirRelationExpr` variants have logic to render themselves to either
             // a collection or an arrangement. In either case, we associate the result with
             // the `relation_expr` argument in the context.
             match relation_expr {
                 // The constant collection is instantiated only on worker zero.
-                RelationExpr::Constant { rows, .. } => {
+                MirRelationExpr::Constant { rows, .. } => {
                     let rows = if worker_index == 0 {
                         rows.clone()
                     } else {
@@ -986,15 +984,15 @@ where
 
                 // A get should have been loaded into the context, and it is surprising to
                 // reach this point given the `has_collection()` guard at the top of the method.
-                RelationExpr::Get { id, typ: _ } => {
+                MirRelationExpr::Get { id, typ: _ } => {
                     // TODO: something more tasteful.
                     // perhaps load an empty collection, warn?
                     panic!("Collection {} not pre-loaded", id);
                 }
 
-                RelationExpr::Let { id, value, body } => {
+                MirRelationExpr::Let { id, value, body } => {
                     let typ = value.typ();
-                    let bind = RelationExpr::Get {
+                    let bind = MirRelationExpr::Get {
                         id: Id::Local(*id),
                         typ,
                     };
@@ -1008,7 +1006,7 @@ where
                     }
                 }
 
-                RelationExpr::Project { input, outputs } => {
+                MirRelationExpr::Project { input, outputs } => {
                     if !self.try_render_map_filter_project(relation_expr, scope, worker_index) {
                         self.ensure_rendered(input, scope, worker_index);
                         let outputs = outputs.clone();
@@ -1026,7 +1024,7 @@ where
                     }
                 }
 
-                RelationExpr::Map { input, scalars } => {
+                MirRelationExpr::Map { input, scalars } => {
                     if !self.try_render_map_filter_project(relation_expr, scope, worker_index) {
                         self.ensure_rendered(input, scope, worker_index);
                         let scalars = scalars.clone();
@@ -1052,13 +1050,13 @@ where
                     }
                 }
 
-                RelationExpr::FlatMap { input, .. } => {
+                MirRelationExpr::FlatMap { input, .. } => {
                     self.ensure_rendered(input, scope, worker_index);
                     let (oks, err) = self.render_flat_map(relation_expr, None);
                     self.collections.insert(relation_expr.clone(), (oks, err));
                 }
 
-                RelationExpr::Filter { input, predicates } => {
+                MirRelationExpr::Filter { input, predicates } => {
                     if !self.try_render_map_filter_project(relation_expr, scope, worker_index) {
                         self.ensure_rendered(input, scope, worker_index);
                         let temp_storage = RowArena::new();
@@ -1080,7 +1078,7 @@ where
                     }
                 }
 
-                RelationExpr::Join {
+                MirRelationExpr::Join {
                     inputs,
                     implementation,
                     ..
@@ -1111,17 +1109,17 @@ where
                     }
                 }
 
-                RelationExpr::Reduce { input, .. } => {
+                MirRelationExpr::Reduce { input, .. } => {
                     self.ensure_rendered(input, scope, worker_index);
                     self.render_reduce(relation_expr, scope);
                 }
 
-                RelationExpr::TopK { input, .. } => {
+                MirRelationExpr::TopK { input, .. } => {
                     self.ensure_rendered(input, scope, worker_index);
                     self.render_topk(relation_expr);
                 }
 
-                RelationExpr::Negate { input } => {
+                MirRelationExpr::Negate { input } => {
                     self.ensure_rendered(input, scope, worker_index);
                     let (ok_collection, err_collection) = self.collection(input).unwrap();
                     let ok_collection = ok_collection.negate();
@@ -1129,12 +1127,12 @@ where
                         .insert(relation_expr.clone(), (ok_collection, err_collection));
                 }
 
-                RelationExpr::Threshold { input } => {
+                MirRelationExpr::Threshold { input } => {
                     self.ensure_rendered(input, scope, worker_index);
                     self.render_threshold(relation_expr);
                 }
 
-                RelationExpr::Union { base, inputs } => {
+                MirRelationExpr::Union { base, inputs } => {
                     let (oks, errs): (Vec<_>, Vec<_>) = iter::once(&**base)
                         .chain(inputs)
                         .map(|input| {
@@ -1149,7 +1147,7 @@ where
                     self.collections.insert(relation_expr.clone(), (ok, err));
                 }
 
-                RelationExpr::ArrangeBy { input, keys } => {
+                MirRelationExpr::ArrangeBy { input, keys } => {
                     // We can avoid rendering if we have all arrangements present,
                     // and there is at least one of them (to ensure the collection
                     // is available independent of arrangements).

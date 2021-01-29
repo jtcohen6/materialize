@@ -187,7 +187,7 @@ pub enum WorkerFeedback {
 /// Configures a dataflow server.
 pub struct Config {
     /// The number of worker threads to spawn.
-    pub threads: usize,
+    pub workers: usize,
     /// The ID of this process in the dataflow cluster.
     pub process: usize,
     /// The Timely worker configuration.
@@ -203,7 +203,7 @@ pub fn serve<C>(
 where
     C: comm::Connection,
 {
-    assert!(config.threads > 0);
+    assert!(config.workers > 0);
 
     // Construct endpoints for each thread that will receive the coordinator's
     // sequenced command stream.
@@ -214,7 +214,7 @@ where
     let command_rxs = {
         let mut rx = switchboard.broadcast_rx(BroadcastToken).fanout();
         let command_rxs = Mutex::new(
-            (0..config.threads)
+            (0..config.workers)
                 .map(|_| Some(rx.attach()))
                 .collect::<Vec<_>>(),
         );
@@ -227,7 +227,7 @@ where
 
     let log_fn = Box::new(|_| None);
     let (builders, guard) =
-        initialize_networking_from_sockets(sockets, config.process, config.threads, log_fn)
+        initialize_networking_from_sockets(sockets, config.process, config.workers, log_fn)
             .map_err(|err| format!("failed to initialize networking: {}", err))?;
     let builders = builders.into_iter().map(GenericBuilder::ZeroCopy).collect();
 
@@ -238,7 +238,7 @@ where
         config.timely_worker.clone(),
         move |timely_worker| {
             let _tokio_guard = tokio_executor.enter();
-            let command_rx = command_rxs.lock().unwrap()[timely_worker.index() % config.threads]
+            let command_rx = command_rxs.lock().unwrap()[timely_worker.index() % config.workers]
                 .take()
                 .unwrap()
                 .request_unparks();
@@ -976,9 +976,16 @@ impl PendingPeek {
                         ));
                     }
 
-                    // TODO: In an ORDER BY .. LIMIT .. setting, once we have a full output
-                    // we could compare each of these to the "least" current output, and
-                    // avoid stashing the result and growing results.
+                    // When we have a LIMIT we can restrict the number of copies we make.
+                    // This protects us when we have many copies of the same records, as
+                    // the DD representation uses a binary count and may not exhaust our
+                    // memory in situtations where this copying might.
+                    if let Some(limit) = max_results {
+                        let limit = std::convert::TryInto::<isize>::try_into(limit);
+                        if let Ok(limit) = limit {
+                            copies = std::cmp::min(copies, limit);
+                        }
+                    }
                     for _ in 0..copies {
                         results.push(result.clone());
                     }

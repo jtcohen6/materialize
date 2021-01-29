@@ -34,14 +34,14 @@ async-trait = "0.1.42"
 backtrace = "0.3.55"
 build-info = { path = "../build-info" }
 cfg-if = "1.0.0"
+clap = "2.33.0"
 comm = { path = "../comm" }
 compile-time-run = "0.2.11"
 coord = { path = "../coord" }
 dataflow = { path = "../dataflow" }
 dataflow-types = { path = "../dataflow-types" }
 differential-dataflow = { git = "https://github.com/TimelyDataflow/differential-dataflow.git" }
-futures = "0.3.9"
-getopts = "0.2.0"
+futures = "0.3.12"
 hex = "0.4.0"
 hyper = { version = "0.14.0", features = ["http1", "server"] }
 include_dir = "0.6.0"
@@ -64,19 +64,20 @@ repr = { path = "../repr" }
 reqwest = { version = "0.11.0", features = ["json"] }
 rlimit = "0.5.3"
 semver = "0.11.0"
-serde = { version = "1.0.0", features = ["derive"] }
+serde = { version = "1.0.122", features = ["derive"] }
 serde_json = "1.0.0"
 shell-words = "1.0.0"
 sql = { path = "../sql" }
 sql-parser = { path = "../sql-parser" }
+structopt = "0.3.21"
 sysctl = "0.4.0"
 # v0.15.4+ fail to cross compile on macOS.
 # See: https://github.com/GuillaumeGomez/sysinfo/pull/404
-sysinfo = "=0.15.3"
-tempfile = "3.1.0"
+sysinfo = "=0.15.9"
+tempfile = "3.2.0"
 timely = { git = "https://github.com/TimelyDataflow/timely-dataflow", default-features = false, features = ["bincode"] }
-tokio = { version = "1.0.2", features = ["sync"] }
-tokio-openssl = "0.6.0"
+tokio = { version = "1.1.0", features = ["sync"] }
+tokio-openssl = "0.6.1"
 tracing = "0.1.21"
 # TODO(benesch): we can use the default features here once tracing-subscriber
 # does not enable chrono's "oldtime" feature.

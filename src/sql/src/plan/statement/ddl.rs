@@ -17,35 +17,33 @@ use std::path::PathBuf;
 use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail};
-use globset::GlobBuilder;
-
 use aws_arn::{Resource, ARN};
-use dataflow_types::SinkEnvelope;
-use dataflow_types::SourceEnvelope;
+use globset::GlobBuilder;
+use itertools::Itertools;
+use reqwest::Url;
+
 use dataflow_types::{
-    AvroEncoding, AvroOcfEncoding, AvroOcfSinkConnectorBuilder, Consistency, CsvEncoding,
-    DataEncoding, ExternalSourceConnector, FileSourceConnector, KafkaSinkConnectorBuilder,
-    KafkaSourceConnector, KinesisSourceConnector, ProtobufEncoding, RegexEncoding,
-    S3SourceConnector, SinkConnectorBuilder, SourceConnector,
+    AvroEncoding, AvroOcfEncoding, AvroOcfSinkConnectorBuilder, Compression, Consistency,
+    CsvEncoding, DataEncoding, ExternalSourceConnector, FileSourceConnector,
+    KafkaSinkConnectorBuilder, KafkaSourceConnector, KinesisSourceConnector, ProtobufEncoding,
+    RegexEncoding, S3SourceConnector, SinkConnectorBuilder, SinkEnvelope, SourceConnector,
+    SourceEnvelope,
 };
 use expr::GlobalId;
 use interchange::avro::{self, DebeziumDeduplicationStrategy, Encoder};
-use interchange::envelopes::dbz_desc;
-use itertools::Itertools;
+use interchange::envelopes;
 use ore::collections::CollectionExt;
 use ore::iter::IteratorExt;
 use regex::Regex;
 use repr::{strconv, RelationDesc, RelationType, ScalarType};
-use reqwest::Url;
-use rusoto_core::Region;
 use sql_parser::ast::Envelope;
 
 use crate::ast::display::AstDisplay;
 use crate::ast::{
     AlterIndexOptionsList, AlterIndexOptionsStatement, AlterObjectRenameStatement, AvroSchema,
-    ColumnOption, Connector, CreateDatabaseStatement, CreateIndexStatement, CreateSchemaStatement,
-    CreateSinkStatement, CreateSourceStatement, CreateTableStatement, CreateTypeAs,
-    CreateTypeStatement, CreateViewStatement, DataType, DropDatabaseStatement,
+    ColumnOption, Connector, CreateDatabaseStatement, CreateIndexStatement, CreateRoleStatement,
+    CreateSchemaStatement, CreateSinkStatement, CreateSourceStatement, CreateTableStatement,
+    CreateTypeAs, CreateTypeStatement, CreateViewStatement, DataType, DropDatabaseStatement,
     DropObjectsStatement, Expr, Format, Ident, IfExistsBehavior, ObjectName, ObjectType, Raw,
     SqlOption, Statement, Value,
 };
@@ -406,34 +404,9 @@ pub fn plan_create_source(
                 _ => unsupported!(format!("AWS Resource type: {:#?}", arn.resource)),
             };
 
-            let region: Region = match arn.region {
-                Some(region) => match region.parse() {
-                    Ok(region) => {
-                        // ignore the endpoint option if we're pointing at a
-                        // valid, non-custom AWS region
-                        with_options.remove("endpoint");
-                        region
-                    }
-                    Err(e) => {
-                        // Region's fromstr doesn't support parsing custom regions.
-                        // If a Kinesis stream's ARN indicates it exists in a custom
-                        // region, support it iff a valid endpoint for the stream
-                        // is also provided.
-                        match with_options.remove("endpoint") {
-                            Some(Value::String(endpoint)) => Region::Custom {
-                                name: region,
-                                endpoint,
-                            },
-                            _ => bail!(
-                                "Unable to parse AWS region: {}. If providing a custom \
-                                        region, an `endpoint` option must also be provided",
-                                e
-                            ),
-                        }
-                    }
-                },
-                None => bail!("Provided ARN does not include an AWS region"),
-            };
+            let region = arn
+                .region
+                .ok_or_else(|| anyhow!("Provided ARN does not include an AWS region"))?;
 
             let connector = ExternalSourceConnector::Kinesis(KinesisSourceConnector {
                 stream_name,
@@ -442,7 +415,7 @@ pub fn plan_create_source(
             let encoding = get_encoding(format)?;
             (connector, encoding)
         }
-        Connector::File { path, .. } => {
+        Connector::File { path, compression } => {
             let tail = match with_options.remove("tail") {
                 None => false,
                 Some(Value::Boolean(b)) => b,
@@ -457,6 +430,7 @@ pub fn plan_create_source(
 
             let connector = ExternalSourceConnector::File(FileSourceConnector {
                 path: path.clone().into(),
+                compression: compression.clone().into(),
                 tail,
             });
             let encoding = get_encoding(format)?;
@@ -496,6 +470,7 @@ pub fn plan_create_source(
 
             let connector = ExternalSourceConnector::AvroOcf(FileSourceConnector {
                 path: path.clone().into(),
+                compression: Compression::None,
                 tail,
             });
             if format.is_some() {
@@ -530,7 +505,7 @@ pub fn plan_create_source(
 
     // TODO: remove bails as more support for upsert is added.
     let envelope = match &envelope {
-        sql_parser::ast::Envelope::None => dataflow_types::SourceEnvelope::None,
+        sql_parser::ast::Envelope::None => SourceEnvelope::None,
         sql_parser::ast::Envelope::Debezium => {
             let dedup_strat = match with_options.remove("deduplication") {
                 None => DebeziumDeduplicationStrategy::Ordered,
@@ -571,7 +546,7 @@ pub fn plan_create_source(
                 }
                 _ => bail!("deduplication must be one of 'ordered', 'full' or 'full_in_range'."),
             };
-            dataflow_types::SourceEnvelope::Debezium(dedup_strat)
+            SourceEnvelope::Debezium(dedup_strat)
         }
         sql_parser::ast::Envelope::Upsert(key_format) => match connector {
             Connector::Kafka { .. } => {
@@ -593,7 +568,7 @@ pub fn plan_create_source(
                     DataEncoding::Bytes | DataEncoding::Text => {}
                     _ => unsupported!("format for upsert key"),
                 }
-                dataflow_types::SourceEnvelope::Upsert(key_encoding)
+                SourceEnvelope::Upsert(key_encoding)
             }
             _ => unsupported!("upsert envelope for non-Kafka sources"),
         },
@@ -608,11 +583,11 @@ pub fn plan_create_source(
                 Some(Format::Avro(_)) => {}
                 _ => unsupported!("non-Avro-encoded ENVELOPE MATERIALIZE"),
             }
-            dataflow_types::SourceEnvelope::CdcV2
+            SourceEnvelope::CdcV2
         }
     };
 
-    if let dataflow_types::SourceEnvelope::Upsert(key_encoding) = &envelope {
+    if let SourceEnvelope::Upsert(key_encoding) = &envelope {
         match &mut encoding {
             DataEncoding::Avro(AvroEncoding { key_schema, .. }) => {
                 *key_schema = None;
@@ -955,7 +930,7 @@ pub fn plan_create_sink(
     });
 
     let value_desc = match envelope {
-        SinkEnvelope::Debezium => dbz_desc(desc.clone()),
+        SinkEnvelope::Debezium => envelopes::dbz_desc(desc.clone()),
         SinkEnvelope::Upsert => desc.clone(),
         SinkEnvelope::Tail { .. } => {
             unreachable!("SinkEnvelope::Tail is only used when creating tails, not sinks")
@@ -1068,7 +1043,7 @@ pub fn plan_create_index(
             let index_name_col_suffix = keys
                 .iter()
                 .map(|k| match k {
-                    expr::ScalarExpr::Column(i) => match on_desc.get_unambiguous_name(*i) {
+                    expr::MirScalarExpr::Column(i) => match on_desc.get_unambiguous_name(*i) {
                         Some(col_name) => col_name.to_string(),
                         None => format!("{}", i + 1),
                     },
@@ -1242,6 +1217,20 @@ fn extract_timestamp_frequency_option(
     }
 }
 
+pub fn describe_create_role(
+    _: &StatementContext,
+    _: CreateRoleStatement,
+) -> Result<StatementDesc, anyhow::Error> {
+    Ok(StatementDesc::new(None))
+}
+
+pub fn plan_create_role(
+    _: &StatementContext,
+    _: CreateRoleStatement,
+) -> Result<Plan, anyhow::Error> {
+    unsupported!("CREATE ROLE")
+}
+
 pub fn describe_drop_database(
     _: &StatementContext,
     _: DropDatabaseStatement,
@@ -1292,6 +1281,7 @@ pub fn plan_drop_objects(
         | ObjectType::Index
         | ObjectType::Sink
         | ObjectType::Type => plan_drop_items(scx, object_type, if_exists, names, cascade),
+        ObjectType::Role => unsupported!("DROP ROLE"),
         ObjectType::Object => unreachable!("cannot drop generic OBJECT, must provide object type"),
     }
 }
