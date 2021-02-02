@@ -101,9 +101,12 @@ def main(argv: List[str]) -> int:
     if args.command in ["create", "run", "start", "up"]:
         deps.acquire()
 
+    # Infer the name of the workflow if not explicitly provided
+    name = args.first_command_arg or Path.cwd().name
+
     # The `run` command requires special handling.
     if args.command == "run":
-        workflow = composition.workflows.get(args.first_command_arg, None)
+        workflow = composition.workflows.get(name, None)
         if workflow is None:
             # Restart any dependencies whose definitions have changed. This is
             # Docker Compose's default behavior for `up`, but not for `run`,
@@ -111,13 +114,7 @@ def main(argv: List[str]) -> int:
             # taken from Buildkite's Docker Compose plugin, is to run an `up`
             # command that requests zero instances of the requested service.
             composition.run(
-                [
-                    "up",
-                    "-d",
-                    "--scale",
-                    f"{args.first_command_arg}=0",
-                    args.first_command_arg,
-                ]
+                ["up", "-d", "--scale", f"{name}=0", name,]
             )
         else:
             # The user has specified a workflow rather than a service. Run the
@@ -136,7 +133,7 @@ def main(argv: List[str]) -> int:
         [
             *unknown_args,
             *([args.command] if args.command is not None else []),
-            *([args.first_command_arg] if args.first_command_arg is not None else []),
+            *([name]),
             *args.remainder,
         ],
         check=False,
